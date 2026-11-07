@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Read-only checks of everything this project expects before 'terraform apply' and the lab:
-# local tools, AWS identity, the EKS cluster and kubectl access, the Spark Operator and the
-# namespaces it watches, and the cluster's IAM OIDC provider (IRSA).
+# local tools, the Rust build host (arm64, Graviton5), AWS identity, Graviton5 (M9g/M9gd)
+# capacity in the region, the EKS cluster and kubectl access, the Spark Operator and the
+# namespaces it watches, the Auto Mode NodeClass and NodePool for Graviton5, and the cluster's
+# IAM OIDC provider (IRSA).
 #
 # It only calls read APIs (sts get-caller-identity, eks describe-cluster,
-# iam list-open-id-connect-providers, kubectl get). Exit code: 0 if no check failed, else 1.
+# ec2 describe-instance-type-offerings, iam list-open-id-connect-providers, kubectl get).
+# Exit code: 0 if no check failed, else 1.
 
 set -euo pipefail
 
@@ -14,10 +17,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 usage() {
   cat <<EOF
 Usage: scripts/check-prereqs.sh [--region R] [--cluster-name C] [--spark-namespace NS]
-                                [--jobs-namespace NS] [--operator-namespace NS] [--outputs-file FILE]
+                                [--jobs-namespace NS] [--operator-namespace NS]
+                                [--node-class NC] [--outputs-file FILE]
 
 Values come from the flags, else from the Terraform outputs (if applied), else from the
-defaults: us-west-2, spark-on-eks, spark-team-a, iceberg, spark-operator.
+defaults: us-west-2, spark-on-eks, spark-team-a, iceberg, spark-operator, ebs-gp3-100gi.
 
 Options:
   --region R              AWS region of the cluster
@@ -25,15 +29,16 @@ Options:
   --spark-namespace NS    namespace for SparkApplications (must be watched by the Spark Operator)
   --jobs-namespace NS     namespace for the Rust CLI Jobs (created by terraform apply)
   --operator-namespace NS namespace of the Spark Operator (default spark-operator)
+  --node-class NC         Auto Mode NodeClass of the Graviton5 NodePool (Terraform graviton5_node_class)
   --outputs-file FILE     read the Terraform outputs from FILE (same as TF_OUTPUT_JSON=FILE)
   -h, --help              show this help
 EOF
 }
 
-REGION_ARG="" CLUSTER_ARG="" SPARK_NS_ARG="" JOBS_NS_ARG="" OPERATOR_NS="spark-operator"
+REGION_ARG="" CLUSTER_ARG="" SPARK_NS_ARG="" JOBS_NS_ARG="" OPERATOR_NS="spark-operator" NODE_CLASS_ARG=""
 while (($#)); do
   case "$1" in
-    --region | --cluster-name | --spark-namespace | --jobs-namespace | --operator-namespace | --outputs-file)
+    --region | --cluster-name | --spark-namespace | --jobs-namespace | --operator-namespace | --node-class | --outputs-file)
       [[ $# -ge 2 ]] || die "$1 needs a value"
       case "$1" in
         --region) REGION_ARG="$2" ;;
@@ -41,6 +46,7 @@ while (($#)); do
         --spark-namespace) SPARK_NS_ARG="$2" ;;
         --jobs-namespace) JOBS_NS_ARG="$2" ;;
         --operator-namespace) OPERATOR_NS="$2" ;;
+        --node-class) NODE_CLASS_ARG="$2" ;;
         --outputs-file) export TF_OUTPUT_JSON="$2" ;;
       esac
       shift
@@ -88,6 +94,16 @@ for cmd in aws kubectl terraform jq; do
 done
 if command -v cargo >/dev/null 2>&1; then
   pass "cargo: $(cargo --version 2>/dev/null | first_line) (optional, builds the Rust CLI)"
+  # rust/build.sh builds natively for aarch64-unknown-linux-gnu with -Ctarget-cpu=neoverse-v3.
+  rust_host="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')"
+  cpu_part="$(awk -F': *' '/^CPU part/ {print $2; exit}' /proc/cpuinfo 2>/dev/null || true)"
+  if [[ "$rust_host" != "aarch64-unknown-linux-gnu" ]]; then
+    warning "Rust host is ${rust_host:-unknown}: rust/build.sh needs an aarch64 Linux host (the Jobs run on Graviton5)"
+  elif [[ "$cpu_part" == "0xd84" ]]; then
+    pass "Rust build host: aarch64, Neoverse V3 (Graviton5)"
+  else
+    note "Rust build host: aarch64, CPU part ${cpu_part:-unknown} (not Neoverse V3): rust/build.sh works, but the Graviton5 binary and cargo test may not run here"
+  fi
 else
   note "cargo not found (optional: only needed to build the Rust CLI with rust/build.sh)"
 fi
@@ -112,6 +128,8 @@ REGION="${REGION_ARG:-$(tf_output region "${AWS_REGION:-${AWS_DEFAULT_REGION:-us
 CLUSTER="${CLUSTER_ARG:-$(tf_output cluster_name spark-on-eks)}"
 SPARK_NS="${SPARK_NS_ARG:-$(tf_output spark_namespace spark-team-a)}"
 JOBS_NS="${JOBS_NS_ARG:-$(tf_output jobs_namespace iceberg)}"
+NODE_CLASS="${NODE_CLASS_ARG:-$(tf_output graviton5_node_class ebs-gp3-100gi)}"
+NODE_POOL="$(tf_output graviton5_node_pool)"
 note "region $REGION | cluster $CLUSTER | spark_namespace $SPARK_NS | jobs_namespace $JOBS_NS"
 note "Terraform: $TF_STATE"
 
@@ -121,6 +139,19 @@ if identity="$(aws sts get-caller-identity --output json 2>&1)"; then
   pass "identity: $(jq -r '.Arn' <<<"$identity") (account $(jq -r '.Account' <<<"$identity"))"
 else
   fail "no AWS identity: $(first_line <<<"$identity")"
+fi
+
+# Graviton5 (GRAVITON5.md): every pod of this project runs on M9g/M9gd nodes.
+if offerings="$(aws ec2 describe-instance-type-offerings --region "$REGION" --location-type availability-zone \
+  --filters Name=instance-type,Values='m9g.*,m9gd.*' --output json 2>&1)"; then
+  zones="$(jq -r '[.InstanceTypeOfferings[].Location] | unique | join(" ")' <<<"$offerings")"
+  if [[ -n "$zones" ]]; then
+    pass "Graviton5 (M9g/M9gd) offered in $REGION: $zones"
+  else
+    fail "no Graviton5 (M9g/M9gd) instance types are offered in $REGION"
+  fi
+else
+  warning "cannot list EC2 instance type offerings (not verifiable with this identity): $(first_line <<<"$offerings")"
 fi
 
 ISSUER=""
@@ -224,6 +255,27 @@ else
 fi
 if [[ "$JOBS_NS" == "$SPARK_NS" ]]; then
   fail "jobs_namespace and spark_namespace must differ"
+fi
+
+# Graviton5 NodePool (terraform/nodepool.tf) and the existing NodeClass it uses.
+if kubectl get nodeclasses.eks.amazonaws.com "$NODE_CLASS" >/dev/null 2>&1; then
+  pass "Auto Mode NodeClass $NODE_CLASS exists (used by the Graviton5 NodePool)"
+else
+  fail "Auto Mode NodeClass $NODE_CLASS not found (set graviton5_node_class to one of: $(kubectl get nodeclasses.eks.amazonaws.com -o name 2>/dev/null | sed 's|.*/||' | paste -sd, -))"
+fi
+if [[ -n "$NODE_POOL" ]]; then
+  if families="$(kubectl get nodepools.karpenter.sh "$NODE_POOL" -o json 2>/dev/null | jq -r '
+      .spec.template.spec.requirements[] | select(.key == "eks.amazonaws.com/instance-family") | .values | join(",")')"; then
+    if [[ "$families" == "m9g,m9gd" ]]; then
+      pass "Graviton5 NodePool $NODE_POOL exists (instance families $families)"
+    else
+      fail "NodePool $NODE_POOL allows instance families '${families:-any}', not only Graviton5 (m9g,m9gd)"
+    fi
+  else
+    fail "Graviton5 NodePool $NODE_POOL not found although Terraform is applied"
+  fi
+else
+  note "Graviton5 NodePool not created yet (terraform apply creates it)"
 fi
 
 echo ""

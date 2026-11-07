@@ -76,6 +76,17 @@ variable "jobs_service_account" {
   default     = "iceberg-jobs"
 }
 
+variable "graviton5_node_class" {
+  description = "EXISTING EKS Auto Mode NodeClass (eks.amazonaws.com/v1) for the Graviton5 NodePool of this project: it sets the subnets, security groups, node IAM role and ephemeral storage of the M9g/M9gd nodes. The default is the platform NodeClass of its general-purpose NodePool (100 GiB gp3). This project only reads it."
+  type        = string
+  default     = "ebs-gp3-100gi"
+
+  validation {
+    condition     = can(regex("^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$", var.graviton5_node_class))
+    error_message = "The graviton5_node_class must be the name of a Kubernetes object (lowercase letters, digits, '-' and '.')."
+  }
+}
+
 variable "spark_event_logs_bucket" {
   description = "Optional existing S3 bucket for Spark event logs (written under spark-event-logs/). Set it to the platform logs bucket to see the jobs in the Spark History Server. Empty: event logs go to s3a://<warehouse_bucket>/lab/spark-event-logs."
   type        = string

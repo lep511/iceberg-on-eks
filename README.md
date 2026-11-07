@@ -10,6 +10,11 @@ Iceberg table:
   `iceberg-lambda-s3` AWS Lambda. It can also split a scan of the table across the pods of an
   Indexed Job (distributed trip statistics).
 
+Everything runs on **AWS Graviton5** (M9g/M9gd, Neoverse V3; see [GRAVITON5.md](GRAVITON5.md)).
+Every Spark driver and executor and every Rust Job is scheduled on the project's own Graviton5
+NodePool. The Rust CLI is compiled for `aarch64` with
+`-Ctarget-cpu=neoverse-v3 -Ctarget-feature=+lse`.
+
 This project is a port of the Lambda-based reference project `apache-iceberg-s3-metadata` to
 Kubernetes. That project is a Rust Lambda that reads and writes the NYC Taxi Iceberg table and
 manages S3 Metadata and S3 Object Annotations. Here it runs on the `spark-on-eks` cluster built by
@@ -60,6 +65,9 @@ trips, tip rate 11.67%, vendors CMT 2,432 / VTS 2,568.
   +---------------------------------------------------------------------------------+
   |  EKS cluster spark-on-eks (Auto Mode)                                           |
   |                                                                                 |
+  |   NodePool spark-on-eks-iceberg-graviton5 (this project): M9g/M9gd, arm64       |
+  |   -> every pod below runs on Graviton5 nodes                                    |
+  |                                                                                 |
   |   namespace spark-team-a (watched by the Spark Operator)                        |
   |   +--------------------------------------+                                      |
   |   | SparkApplications (this project)     |   SA spark-iceberg                   |
@@ -96,6 +104,12 @@ trips, tip rate 11.67%, vendors CMT 2,432 / VTS 2,568.
 - `nyc_taxi_trips_curated` is a **derived table** that the Spark analytics job owns. It has typed
   timestamps and is partitioned by `days(pickup_ts)`. All row-level operations, schema evolution
   and maintenance run on it.
+- **Graviton5 only.** `terraform/nodepool.tf` creates an EKS Auto Mode NodePool limited to the
+  Graviton5 families `m9g` and `m9gd` (arm64, `large` to `8xlarge`, on-demand or spot). It uses
+  an existing platform NodeClass (`graviton5_node_class`, default `ebs-gp3-100gi`). The pods
+  select it with `karpenter.sh/nodepool` and `kubernetes.io/arch: arm64`. None of the platform's
+  NodePools is limited to Graviton5, so they are not used. All images are multi-arch and have a
+  `linux/arm64` variant: the Spark image, `aws-cli` and `amazonlinux:2023-minimal`.
 - Artifacts reach the cluster through S3, so Docker is not needed. Spark reads its scripts from
   `s3a://<bucket>/lab/scripts/spark/`. Each Rust Job downloads the binary from `lab/bin/` with an
   `aws-cli` initContainer and runs it on `amazonlinux:2023-minimal`. A `rust/Dockerfile` is
@@ -108,7 +122,7 @@ S3 layout of the warehouse bucket:
 | `warehouse/<db>/<table>/{data,metadata}/` | Iceberg tables (`ICEBERG_WAREHOUSE = s3://<bucket>/warehouse`) |
 | `lab/input/nyctaxi_payload.json` | Sample data |
 | `lab/scripts/spark/*.py` | PySpark jobs |
-| `lab/bin/iceberg-k8s` | Rust CLI (linux x86_64) |
+| `lab/bin/iceberg-k8s` | Rust CLI (linux aarch64, built for Graviton5 / Neoverse V3) |
 | `lab/runs/<run id>/` | Distributed trip stats: `plan.json`, `shards/shard-<index>.json`, `result.json` |
 | `lab/spark-event-logs/` | Spark event logs (default; see `spark_event_logs_bucket`) |
 
@@ -116,18 +130,21 @@ S3 layout of the warehouse bucket:
 
 ```
 .
-├── terraform/                  # Standalone root module: bucket, IRSA roles, namespace, SAs, RBAC
+├── GRAVITON5.md                # Graviton5 reference: instances, compiler flags, performance tips
+├── terraform/                  # Standalone root module: bucket, IRSA roles, namespace, SAs, RBAC,
+│                               #   Graviton5 NodePool (nodepool.tf)
 ├── spark/
 │   ├── iceberg_nyc_taxi_load.py        # Create DB + table, load the payload, validate
 │   ├── iceberg_nyc_taxi_analytics.py   # Trip stats, time travel, tags, curated table, maintenance
 │   ├── iceberg_cleanup.py              # DROP TABLE ... PURGE + DROP NAMESPACE (needs --confirm)
 │   ├── manifests/                      # SparkApplication templates
-│   └── tests/                          # pytest suite (helpers, manifests, trip-stats SQL)
+│   └── tests/                          # pytest suite (helpers, manifests, Graviton5 contract, trip-stats SQL)
 ├── rust/
 │   ├── iceberg-k8s/                    # Rust CLI (port of the Lambda), README with all actions
 │   ├── manifests/                      # Kubernetes Job templates
-│   ├── build.sh                        # Release build -> build/bin/iceberg-k8s
-│   └── Dockerfile                      # Optional container image
+│   ├── .cargo/config.toml              # Graviton5 rustflags (neoverse-v3, +lse) for aarch64
+│   ├── build.sh                        # Graviton5 release build -> build/bin/iceberg-k8s
+│   └── Dockerfile                      # Optional container image (linux/arm64)
 ├── scripts/
 │   ├── check-prereqs.sh                # Read-only checks of tools, AWS, cluster, Spark Operator
 │   ├── upload-artifacts.sh             # data + Spark scripts + binary -> s3://<bucket>/lab/
@@ -147,8 +164,12 @@ S3 layout of the warehouse bucket:
   OIDC provider of the cluster. Every name can be changed with Terraform variables.
 - **Tools:** AWS CLI v2, `kubectl`, Terraform >= 1.5.7, `jq`, and `cargo` (Rust 1.95+: iceberg
   0.11, edition 2024) to build the CLI. `uv` is optional and only needed to run the Python tests.
-- **Rust build host.** The Rust CLI is built on an x86_64 Amazon Linux 2023 host (the workshop
-  IDE). The binary links glibc 2.34, which matches the `amazonlinux:2023` runtime image.
+- **Graviton5 capacity.** M9g/M9gd must be offered in the region (they are in all four
+  `us-west-2` zones), and the cluster must use EKS Auto Mode, which supports both families. The
+  platform NodeClass `ebs-gp3-100gi` must exist; it is used by the Graviton5 NodePool.
+- **Rust build host.** The Rust CLI is built natively on an arm64 Amazon Linux 2023 host. The
+  workshop IDE is a Graviton5 host (Neoverse V3). The binary links glibc 2.34, which matches the
+  arm64 `amazonlinux:2023` runtime image.
 - **kubectl** must point at the cluster:
   `aws eks update-kubeconfig --region us-west-2 --name spark-on-eks`.
 
@@ -197,7 +218,9 @@ terraform -chdir=terraform init
 terraform -chdir=terraform apply
 ```
 
-The apply creates 15 resources:
+The apply creates 16 resources:
+- the Graviton5 NodePool `spark-on-eks-iceberg-graviton5` (M9g/M9gd), where every pod of the
+  project runs;
 - the warehouse bucket, its public access block, its encryption configuration, and the
   `lab/spark-event-logs/` marker object;
 - the two IRSA roles, with one inline policy and one trust-policy tracker each;
@@ -213,7 +236,7 @@ it. Without it, event logs go to `s3a://<warehouse bucket>/lab/spark-event-logs`
 ### 2. Build the Rust CLI and upload the artifacts
 
 ```bash
-rust/build.sh                     # ~15 min the first time; writes build/bin/iceberg-k8s
+rust/build.sh                     # ~15 min the first time; writes build/bin/iceberg-k8s (aarch64, Graviton5)
 scripts/upload-artifacts.sh       # data, Spark scripts and binary -> s3://<bucket>/lab/
 scripts/render-manifests.sh       # build/manifests/{spark,rust}/*.yaml
 ```
@@ -306,8 +329,8 @@ See [S3 Metadata and S3 Object Annotations](#s3-metadata-and-s3-object-annotatio
 Providers are pinned exactly: `hashicorp/aws` 6.72.0 and `hashicorp/kubernetes` 3.5.0. The
 backend is local; an S3 backend example is commented out in `versions.tf`. The module uses data
 sources for the platform. It checks that the cluster is `ACTIVE`, that the OIDC provider exists,
-and that `spark_namespace` exists. It also warns if the Spark Operator does not watch that
-namespace.
+and that `spark_namespace` and `graviton5_node_class` exist. It also warns if the Spark Operator
+does not watch that namespace.
 
 | Variable | Default | Notes |
 |---|---|---|
@@ -320,13 +343,14 @@ namespace.
 | `spark_service_account` | `spark-iceberg` | |
 | `jobs_namespace` | `iceberg` | Created by this module (Pod Security `baseline`) |
 | `jobs_service_account` | `iceberg-jobs` | |
+| `graviton5_node_class` | `ebs-gp3-100gi` | Existing Auto Mode NodeClass of the Graviton5 NodePool (subnets, security groups, node role, disk) |
 | `spark_event_logs_bucket` | `""` | Platform logs bucket for the Spark History Server (optional) |
 | `tags` | `{}` | Extra tags; `Project = <name>` is always added |
 
 Outputs: `region`, `cluster_name`, `warehouse_bucket`, `iceberg_warehouse`, `lab_uri`,
 `glue_database`, `iceberg_table`, `spark_irsa_role_arn`, `jobs_irsa_role_arn`, `spark_namespace`,
-`spark_service_account`, `jobs_namespace`, `jobs_service_account`, `spark_event_log_dir`,
-`configure_kubectl`.
+`spark_service_account`, `jobs_namespace`, `jobs_service_account`, `graviton5_node_pool`,
+`graviton5_node_class`, `spark_event_log_dir`, `configure_kubectl`.
 
 `scripts/render-manifests.sh` replaces `<FOO_BAR>` in every template with the string output
 `foo_bar`, and fails if any placeholder is left.
@@ -341,9 +365,10 @@ Outputs: `region`, `cluster_name`, `warehouse_bucket`, `iceberg_warehouse`, `lab
   `warehouse=s3://<bucket>/warehouse` and `http-client.type=apache`. The SDK bundle has no
   URLConnection client, so the Apache client is set explicitly. S3A uses
   `WebIdentityTokenFileCredentialsProvider`, the IRSA provider.
-- **Scheduling:** the driver runs on the on-demand `SparkComputeOptimized` NodePool with
-  `karpenter.sh/do-not-disrupt`. Executors run on `SparkComputeOptimized`, where spot is allowed.
-  Pods run as non-root uid 185.
+- **Scheduling:** the driver and the executors run only on the Graviton5 NodePool
+  (`karpenter.sh/nodepool: <GRAVITON5_NODE_POOL>`, `kubernetes.io/arch: arm64`). The driver is
+  on-demand with `karpenter.sh/do-not-disrupt`; executors may run on spot. The JVM uses the
+  `linux/arm64` variant of the image. Pods run as non-root uid 185.
 - **Configuration:** the catalog is set only through Spark configuration. The scripts receive just
   the catalog name, so the same code also runs against a local Iceberg Hadoop catalog (see
   [Testing](#testing)).
@@ -356,6 +381,10 @@ Outputs: `region`, `cluster_name`, `warehouse_bucket`, `iceberg_warehouse`, `lab
 
 ### Rust CLI (`rust/`)
 
+- **Graviton5 build:** `rust/build.sh` builds natively for `aarch64-unknown-linux-gnu`. The flags
+  come from `rust/.cargo/config.toml`: `-Ctarget-cpu=neoverse-v3 -Ctarget-feature=+lse`, the
+  general best configuration of [GRAVITON5.md](GRAVITON5.md). The binary needs a Graviton5 CPU,
+  and every Job pins on-demand nodes of the Graviton5 NodePool.
 - **Port:** `iceberg-k8s` is the reference Lambda without `lambda_runtime`. The 13 actions and the
   JSON contract are unchanged. Dependencies: iceberg 0.11.0 (with iceberg-catalog-glue and
   iceberg-storage-opendal 0.11.0), arrow/parquet 58.4, Rust edition 2024.
@@ -447,7 +476,7 @@ Offline suites, with no AWS credentials needed:
 
 | Suite | Command | Result |
 |---|---|---|
-| Spark helpers | `uv run --with pyspark==4.0.1 --with pytest pytest spark/tests` | 95 passed, 16 skipped without Java; the 16 run with `JAVA_HOME` set (local Spark, trip-stats SQL on temp views; no Iceberg catalog) |
+| Spark helpers and Graviton5 contract | `uv run --with pyspark==4.0.1 --with pytest pytest spark/tests` | 112 passed, 16 skipped without Java; the 16 run with `JAVA_HOME` set (local Spark, trip-stats SQL on temp views; no Iceberg catalog). `test_graviton5.py` checks that every manifest selects the Graviton5 NodePool and arm64, that the NodePool allows only `m9g`/`m9gd`, and the Rust Graviton5 build settings |
 | Rust CLI | `cd rust/iceberg-k8s && cargo test` | 73 unit + 11 CLI tests passed (1 ignored AWS test); they include a write to an in-memory table that checks the zstd codec |
 | Rust lint | `cargo fmt --check && cargo clippy --all-targets -- -D warnings` | clean |
 | Terraform | `terraform -chdir=terraform fmt -check && terraform -chdir=terraform validate` | valid |
@@ -482,7 +511,8 @@ The [Quick start](#quick-start) steps 1 to 5 were then run once on the `spark-on
 | `spark-iceberg-analytics` | Completed on the first attempt: 2 snapshots on the shared table, MERGE (5,000 rows), UPDATE (5,000), DELETE (18), compaction 60 -> 30 data files, 4,982 rows in 30 partitions |
 
 Auto Mode scheduled the Spark driver and executors on `compute-optimized-x86` and the Rust Jobs
-on `general-purpose`. All images were pulled from public ECR.
+on `general-purpose`. All images were pulled from public ECR. These runs, and the ones below,
+predate the move to Graviton5 (x86_64 binary and nodes).
 
 After the move to iceberg-rust 0.11.0 (edition 2024), these steps ran on the same table (still
 2026-11-06):
@@ -554,7 +584,10 @@ terraform -chdir=terraform destroy
 | Cleanup job fails with `AccessDenied` while loading a table | The table's metadata is in a bucket the role cannot read (usually one deleted by an earlier `terraform destroy`) | See the recovery steps in [Cleanup](#cleanup) |
 | `render-manifests.sh` reports an unresolved placeholder | Terraform not applied, or a template uses a name that is not an output | Run `terraform apply`; use only output names in templates |
 | `upload-artifacts.sh` skips the binary | `build/bin/iceberg-k8s` missing | Run `rust/build.sh` |
-| `cargo` or `rust/build.sh` fails with `ld terminated with signal 7 [Bus error]` or `No space left on device` | The IDE's 30 GB root disk is full. Debug builds in `rust/iceberg-k8s/target/debug` grow to more than 10 GB | `cd rust/iceberg-k8s && cargo clean --profile dev` (the release build in `target/x86_64-unknown-linux-gnu` is kept) |
+| `cargo` or `rust/build.sh` fails with `ld terminated with signal 7 [Bus error]` or `No space left on device` | The IDE's root disk is full. Debug builds in `rust/iceberg-k8s/target/debug` grow to more than 10 GB | `cd rust/iceberg-k8s && cargo clean --profile dev` (the release build in `target/aarch64-unknown-linux-gnu` is kept) |
+| Pods stay `Pending` with no node launched | The Graviton5 NodePool is missing (Terraform not applied) or cannot launch M9g/M9gd (capacity, limits, NodeClass) | `kubectl get nodepool spark-on-eks-iceberg-graviton5`, `kubectl get nodeclaims`, and the pod events; `scripts/check-prereqs.sh` checks the NodeClass, the NodePool and the M9g/M9gd offerings |
+| CLI container fails with `exec format error` | An x86_64 binary was uploaded | Rebuild with `rust/build.sh` (aarch64) and run `scripts/upload-artifacts.sh` again |
+| CLI or `cargo test` stops with `Illegal instruction` (`SIGILL`) | Code built with `-Ctarget-cpu=neoverse-v3` ran on a CPU older than Graviton5 | Run it on Graviton5: the Jobs only use the Graviton5 NodePool; build and test on a Graviton5 host such as the IDE |
 | `create_metadata_config` fails with `AccessDenied` mentioning KMS | Only relevant for SSE-KMS metadata tables | Add `kms:DescribeKey` to the Jobs role policy (this project uses SSE-S3) |
 | Distributed plan fails with `plan.json already exists` | The run id was used before (plans are write-once) | Use a new `--run-id`, or leave it out to get a generated one |
 | A shard fails with `the planned snapshot does not match the plan` | The plan's snapshot no longer has those files (for example, snapshots were expired between the plan and the shards) | Run `scripts/run-distributed-stats.sh` again |
@@ -567,10 +600,7 @@ terraform -chdir=terraform destroy
   zstd) and step 6 were run again. Not run in the cluster yet:
   - the S3 Metadata Jobs (enable, status, disable);
   - the `spark-iceberg-cleanup` job and `terraform destroy`;
-  - a second run of the load and analytics jobs (only tested against a local catalog).
-- **Spark has not read the 0.11.0 data files yet.** A re-run of `spark-iceberg-analytics` was
-  cancelled because EC2 throttled node launches (`RequestLimitExceeded`) and Auto Mode could not
-  start a `compute-optimized-x86` node. The 0.11.0 files were read back only by the Rust CLI.
+  - a second run of the load job (only tested against a local catalog).
 - **Lake Formation.** The Lake Formation mode of the account could not be read with the IDE role.
   In this account the in-cluster run created and wrote the tables with IAM permissions alone, so
   no Lake Formation grants were needed. In an account where Lake Formation governs the catalog,
@@ -581,5 +611,25 @@ terraform -chdir=terraform destroy
   results; there is no shuffle. The smallest unit of work is one data file. Every shard
   plans the snapshot again and downloads the whole `plan.json`, which grows with the number of
   data files.
-- **Rust build host.** The binary targets x86_64 nodes (`kubernetes.io/arch: amd64`) and must be
-  built on a host with glibc 2.34 or older, such as Amazon Linux 2023.
+- **Graviton5 partly run in the cluster.** The Graviton5 NodePool is applied. On 2026-11-07
+  these ran on Graviton5. The Rust Jobs below ran on an on-demand `m9g.large` node:
+  - `job-read.yaml`: `rows_read: 20000`, the same as before the move.
+  - `job-write-and-annotate.yaml`: 5,000 rows appended and annotated, with
+    `compression=Zstd(level=3)`. Its `trip_stats` are identical to the payload's, and the data
+    file has 408,283 bytes, the same size as the one the x86_64 build wrote. The table now has
+    25,000 rows in 5 data files.
+  - `run-distributed-stats.sh --shards 5`: one data file per shard, 69 s for the three steps.
+    The merged `trip_stats` are exactly 5 times those of the payload (25,000 trips, CMT 12,160 /
+    VTS 12,840, tip rate 11.67%).
+  - `spark-iceberg-analytics` (second run in the cluster): the driver and both executors ran on
+    an on-demand `m9g.2xlarge`, and the job completed on the first attempt in 75 s. Spark read
+    all 5 data files, including those written by the 0.11.0 CLI (uncompressed, and zstd on
+    x86_64 and on Graviton5). Its `trip_stats` are identical, field by field, to the Rust
+    distributed merge. The curated table converged to the same 4,982 rows in 30 partitions.
+
+  The S3 Metadata Jobs and the `spark-iceberg-load` and `spark-iceberg-cleanup` jobs have only
+  passed the offline tests and server-side dry runs on Graviton5 so far.
+- **Rust build host.** The binary targets Graviton5 nodes only (`kubernetes.io/arch: arm64`,
+  Neoverse V3). It must be built on an arm64 host with glibc 2.34 or older, such as Amazon
+  Linux 2023 on the IDE. It may not run on Graviton2/3/4: for a fleet that mixes generations,
+  GRAVITON5.md recommends `-Ctarget-cpu=neoverse-512tvb` instead.

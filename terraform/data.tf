@@ -44,6 +44,23 @@ data "kubernetes_namespace_v1" "spark" {
   }
 }
 
+# The Graviton5 NodePool (nodepool.tf) uses an EXISTING Auto Mode NodeClass of the platform.
+data "kubernetes_resource" "graviton5_node_class" {
+  api_version = "eks.amazonaws.com/v1"
+  kind        = "NodeClass"
+
+  metadata {
+    name = var.graviton5_node_class
+  }
+
+  lifecycle {
+    postcondition {
+      condition     = try(self.object.metadata.name, "") == var.graviton5_node_class
+      error_message = "EKS Auto Mode NodeClass ${var.graviton5_node_class} does not exist in cluster ${var.cluster_name}. Set graviton5_node_class to an existing NodeClass (kubectl get nodeclasses)."
+    }
+  }
+}
+
 # Optional platform bucket for Spark event logs: fail at plan time on a typo.
 data "aws_s3_bucket" "spark_event_logs" {
   count = var.spark_event_logs_bucket != "" ? 1 : 0

@@ -34,10 +34,12 @@ spec:
       # IRSA: the service account is annotated with the project's IRSA role.
       serviceAccountName: <JOBS_SERVICE_ACCOUNT>
       restartPolicy: Never
+      # Graviton5 only (M9g/M9gd): the project's NodePool (terraform/nodepool.tf). The CLI is
+      # built for aarch64 / Neoverse V3 (rust/build.sh) and needs a Graviton5 CPU.
       nodeSelector:
-        kubernetes.io/arch: amd64
+        karpenter.sh/nodepool: <GRAVITON5_NODE_POOL>
+        kubernetes.io/arch: arm64
         karpenter.sh/capacity-type: on-demand
-        NodeGroupType: general-purpose
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532

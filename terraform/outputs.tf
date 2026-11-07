@@ -66,6 +66,16 @@ output "jobs_service_account" {
   value       = kubernetes_service_account_v1.jobs.metadata[0].name
 }
 
+output "graviton5_node_pool" {
+  description = "EKS Auto Mode NodePool of Graviton5 instances (M9g, M9gd; arm64) created by this project. Every Spark driver and executor and every Rust CLI Job selects it with karpenter.sh/nodepool."
+  value       = kubernetes_manifest.graviton5_node_pool.manifest.metadata.name
+}
+
+output "graviton5_node_class" {
+  description = "Existing EKS Auto Mode NodeClass used by the Graviton5 NodePool."
+  value       = data.kubernetes_resource.graviton5_node_class.object.metadata.name
+}
+
 output "spark_event_log_dir" {
   description = "Value for spark.eventLog.dir (s3a URI): the platform logs bucket when spark_event_logs_bucket is set (visible in the Spark History Server), otherwise a prefix of the warehouse bucket."
   value = (

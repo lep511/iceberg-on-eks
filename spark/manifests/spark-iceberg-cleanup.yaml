@@ -80,8 +80,10 @@ spec:
       app.kubernetes.io/part-of: spark-on-eks-iceberg
     annotations:
       karpenter.sh/do-not-disrupt: "true"
+    # Graviton5 only (M9g/M9gd, arm64): the project's NodePool (terraform/nodepool.tf).
     nodeSelector:
-      NodeGroupType: "SparkComputeOptimized"
+      karpenter.sh/nodepool: "<GRAVITON5_NODE_POOL>"
+      kubernetes.io/arch: "arm64"
       karpenter.sh/capacity-type: "on-demand"
     securityContext:
       runAsNonRoot: true
@@ -100,8 +102,11 @@ spec:
     labels:
       app: spark-iceberg-cleanup
       app.kubernetes.io/part-of: spark-on-eks-iceberg
+    # Graviton5 only (M9g/M9gd, arm64), spot or on-demand: the project's NodePool allows both,
+    # and Spark re-runs the tasks of a lost executor.
     nodeSelector:
-      NodeGroupType: "SparkComputeOptimized"
+      karpenter.sh/nodepool: "<GRAVITON5_NODE_POOL>"
+      kubernetes.io/arch: "arm64"
     securityContext:
       runAsNonRoot: true
       runAsUser: 185

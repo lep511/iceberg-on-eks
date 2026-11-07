@@ -38,6 +38,10 @@ locals {
   spark_operator_namespace  = "spark-operator"
   spark_operator_deployment = "spark-operator-controller"
 
+  # Graviton5 NodePool (nodepool.tf). M9g and M9gd are the Graviton5 families (GRAVITON5.md).
+  graviton5_node_pool         = "${var.name}-graviton5"
+  graviton5_instance_families = ["m9g", "m9gd"]
+
   k8s_labels = {
     "app.kubernetes.io/part-of"    = var.name
     "app.kubernetes.io/managed-by" = "terraform"

@@ -11,6 +11,9 @@
 # jobs_namespace        = "iceberg"
 # jobs_service_account  = "iceberg-jobs"
 
+# Existing EKS Auto Mode NodeClass of the Graviton5 NodePool (M9g/M9gd) that every pod uses.
+# graviton5_node_class  = "ebs-gp3-100gi"
+
 # Write Spark event logs to the platform bucket (under spark-event-logs/) so the jobs show
 # up in the Spark History Server. Leave unset to use s3a://<warehouse_bucket>/lab/spark-event-logs.
 # Get the bucket name from the platform blueprint:

@@ -20,11 +20,27 @@ cargo test                       # 84 offline tests (73 unit + 11 CLI); no AWS c
 cargo clippy --all-targets -- -D warnings
 # Optional, read-only AWS check of the FileIO credential path (reads one object):
 ICEBERG_K8S_TEST_S3_URI=s3://<bucket>/<key> AWS_REGION=us-west-2 cargo test -- --ignored
-../build.sh                      # release build for x86_64-unknown-linux-gnu -> ../../build/bin/iceberg-k8s
+../build.sh                      # release build for aarch64-unknown-linux-gnu (Graviton5) -> ../../build/bin/iceberg-k8s
 ```
 
-`build.sh` must run on the x86_64 Amazon Linux 2023 IDE: the binary links the host glibc (2.34).
-It needs no OpenSSL (all TLS is rustls) but reads the system CA bundle at run time.
+The CLI targets **AWS Graviton5** only (Neoverse V3, Armv9.2-a; see
+[GRAVITON5.md](../../GRAVITON5.md)). `../.cargo/config.toml` sets the flags for
+`aarch64-unknown-linux-gnu`:
+
+```toml
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-Ctarget-cpu=neoverse-v3", "-Ctarget-feature=+lse"]
+```
+
+- Cargo reads that file from `rust/` and below, so run cargo from this directory (as above) or
+  through `build.sh`. `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS` and
+  `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS` would replace these flags; `build.sh`
+  ignores them and prints a warning.
+- The binary, and `cargo test`, need a Graviton5 CPU. The workshop IDE is a Graviton5 host
+  (CPU part `0xd84`, Neoverse V3). On older Graviton hosts they may stop with `SIGILL`.
+- `build.sh` must run on an arm64 Amazon Linux 2023 host (the IDE). The binary links the host
+  glibc (2.34), the same as the arm64 `amazonlinux:2023-minimal` runtime image. It needs no
+  OpenSSL (all TLS is rustls) but reads the system CA bundle at run time.
 
 ## Usage
 
@@ -162,7 +178,9 @@ Templates in `../manifests/` (rendered by `scripts/render-manifests.sh` into
 `build/manifests/rust/`). Each Job uses the IRSA service account, an `aws-cli` initContainer that
 copies `s3://<bucket>/lab/bin/iceberg-k8s` (and the payload when needed) into an `emptyDir`
 mounted at `/work`, and runs the binary on `amazonlinux:2023-minimal` as a non-root user with a
-read-only root filesystem on an on-demand amd64 node, with `karpenter.sh/do-not-disrupt`. Jobs use
+read-only root filesystem, with `karpenter.sh/do-not-disrupt`. The pods run only on on-demand
+nodes of the project's Graviton5 NodePool (M9g/M9gd, arm64; `terraform/nodepool.tf`), selected
+with `karpenter.sh/nodepool: <GRAVITON5_NODE_POOL>` and `kubernetes.io/arch: arm64`. Jobs use
 `generateName`, so create them with `kubectl create` (not `kubectl apply`); finished Jobs are
 deleted after one hour. `job-write-and-annotate.yaml` and `job-s3-metadata-enable.yaml` never
 retry (`backoffLimit: 0`): a retried append would write the rows twice.

@@ -1,0 +1,15 @@
+# AWS Graviton5 (Neoverse V3, Armv9.2-a) is the only CPU this project targets: every Kubernetes
+# Job runs on the Graviton5 NodePool (M9g/M9gd) created by terraform/nodepool.tf. See GRAVITON5.md.
+#
+#   -Ctarget-cpu=neoverse-v3  Neoverse V3 features (SVE2, BF16, PAuth, BTI, ...) and instruction
+#                             scheduling. LLVM has no "graviton5" CPU: neoverse-v3 is the name.
+#   -Ctarget-feature=+lse     LSE atomics (part of neoverse-v3, kept explicit as in GRAVITON5.md)
+#
+# A binary built with these flags needs a Graviton5 CPU; it may not run on Graviton2/3/4.
+#
+# Cargo reads this file when it runs from rust/ or below: rust/build.sh, rust/Dockerfile and
+# `cd rust/iceberg-k8s && cargo test`. The RUSTFLAGS, CARGO_ENCODED_RUSTFLAGS and
+# CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS environment variables replace these flags,
+# so rust/build.sh unsets them.
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-Ctarget-cpu=neoverse-v3", "-Ctarget-feature=+lse"]

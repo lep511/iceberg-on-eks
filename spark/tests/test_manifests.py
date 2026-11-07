@@ -14,7 +14,7 @@ MANIFESTS = sorted((SPARK_DIR / "manifests").glob("*.yaml"))
 CONTRACT_PLACEHOLDERS = {
     "REGION", "CLUSTER_NAME", "WAREHOUSE_BUCKET", "ICEBERG_WAREHOUSE", "LAB_URI", "GLUE_DATABASE",
     "ICEBERG_TABLE", "SPARK_IRSA_ROLE_ARN", "JOBS_IRSA_ROLE_ARN", "SPARK_NAMESPACE", "SPARK_SERVICE_ACCOUNT", "JOBS_NAMESPACE",
-    "JOBS_SERVICE_ACCOUNT", "SPARK_EVENT_LOG_DIR",
+    "JOBS_SERVICE_ACCOUNT", "SPARK_EVENT_LOG_DIR", "GRAVITON5_NODE_POOL", "GRAVITON5_NODE_CLASS",
 }
 IMAGE = "public.ecr.aws/data-on-eks/spark:4.0.1-scala2.13-java21-python3-r-ubuntu"
 
@@ -39,8 +39,12 @@ def test_manifest_conventions(manifest):
     assert '"spark.sql.catalog.glue.warehouse": "<ICEBERG_WAREHOUSE>"' in text
     assert '"spark.eventLog.dir": "<SPARK_EVENT_LOG_DIR>"' in text
     assert 'karpenter.sh/do-not-disrupt: "true"' in text
-    assert text.count('NodeGroupType: "SparkComputeOptimized"') == 2
-    assert 'karpenter.sh/capacity-type: "on-demand"' in text
+    # Driver and executor run only on the project's Graviton5 NodePool (M9g/M9gd, arm64); only
+    # the driver is pinned to on-demand.
+    assert text.count('karpenter.sh/nodepool: "<GRAVITON5_NODE_POOL>"') == 2
+    assert text.count('kubernetes.io/arch: "arm64"') == 2
+    assert text.count('karpenter.sh/capacity-type: "on-demand"') == 1
+    assert "NodeGroupType" not in text
     assert "timeToLiveSeconds:" in text
     assert '- "--catalog"\n    - "glue"' in text
     # scripts/cleanup.sh and the other components select lab workloads by this label.

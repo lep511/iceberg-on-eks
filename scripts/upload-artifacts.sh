@@ -115,8 +115,8 @@ done
 
 BINARY="$REPO_ROOT/build/bin/iceberg-k8s"
 if [[ -f "$BINARY" ]]; then
-  if command -v file >/dev/null 2>&1 && ! file -b "$BINARY" | grep -q 'ELF 64-bit.*x86-64'; then
-    warn "$BINARY is not a linux x86_64 ELF binary ($(file -b "$BINARY" | cut -c1-60)); the Jobs run on amd64 nodes"
+  if command -v file >/dev/null 2>&1 && ! file -b "$BINARY" | grep -q 'ELF 64-bit.*ARM aarch64'; then
+    warn "$BINARY is not a linux aarch64 ELF binary ($(file -b "$BINARY" | cut -c1-60)); the Jobs run on Graviton5 (arm64) nodes. Rebuild it with rust/build.sh"
   fi
   add "$BINARY" "bin/iceberg-k8s" "application/octet-stream"
 else
