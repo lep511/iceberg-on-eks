@@ -1,0 +1,134 @@
+# Distributed trip stats, step 1 of 3 (plan_trip_stats): pins the current snapshot of the shared
+# table, plans its scan and assigns the data files to SHARD_COUNT shards, balanced by size.
+# Writes s3://<WAREHOUSE_BUCKET>/lab/runs/$(RUN_ID)/plan.json; fails if it already exists.
+#
+# Run the three steps with scripts/run-distributed-stats.sh --shards N. By hand:
+#   scripts/run-job.sh build/manifests/rust/job-trip-stats-plan.yaml RUN_ID=r1 SHARD_COUNT=4
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # generateName gives every run a unique name: create it with `kubectl create -f`
+  # (`kubectl apply` does not support generateName).
+  generateName: iceberg-k8s-trip-stats-plan-
+  namespace: <JOBS_NAMESPACE>
+  labels:
+    app.kubernetes.io/name: iceberg-k8s
+    app.kubernetes.io/component: trip-stats-plan
+    app.kubernetes.io/part-of: spark-on-eks-iceberg
+spec:
+  # A retry after plan.json was written would fail on purpose (the plan is write-once).
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      annotations:
+        # Keep Auto Mode consolidation from evicting the pod mid-run.
+        karpenter.sh/do-not-disrupt: "true"
+      labels:
+        app.kubernetes.io/name: iceberg-k8s
+        app.kubernetes.io/component: trip-stats-plan
+        app.kubernetes.io/part-of: spark-on-eks-iceberg
+    spec:
+      # IRSA: the service account is annotated with the project's IRSA role.
+      serviceAccountName: <JOBS_SERVICE_ACCOUNT>
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/arch: amd64
+        karpenter.sh/capacity-type: on-demand
+        NodeGroupType: general-purpose
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        # Makes the projected IRSA token readable by the non-root user.
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: work
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+      initContainers:
+        # Downloads the CLI (built by rust/build.sh, uploaded by scripts/upload-artifacts.sh).
+        - name: fetch
+          image: public.ecr.aws/aws-cli/aws-cli:2.39.5
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              aws s3 cp --only-show-errors "s3://<WAREHOUSE_BUCKET>/lab/bin/iceberg-k8s" /work/iceberg-k8s
+              chmod 0755 /work/iceberg-k8s
+              ls -l /work
+          env:
+            - name: AWS_REGION
+              value: <REGION>
+            # The AWS CLI keeps its cache under $HOME; the root filesystem is read-only.
+            - name: HOME
+              value: /tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: work
+              mountPath: /work
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: iceberg-k8s
+          # glibc 2.34 (same as the AL2023 build host), CA bundle in /etc/pki/tls/certs.
+          image: public.ecr.aws/amazonlinux/amazonlinux:2023.12.20261102.0-minimal
+          command: ["/work/iceberg-k8s"]
+          args:
+            - "--action"
+            - "plan_trip_stats"
+            - "--namespace"
+            - "<GLUE_DATABASE>"
+            - "--table"
+            - "<ICEBERG_TABLE>"
+            - "--run-uri"
+            - "s3://<WAREHOUSE_BUCKET>/lab/runs/$(RUN_ID)"
+            - "--shard-count"
+            - "$(SHARD_COUNT)"
+          env:
+            - name: ICEBERG_WAREHOUSE
+              value: <ICEBERG_WAREHOUSE>
+            - name: AWS_REGION
+              value: <REGION>
+            - name: RUST_LOG
+              value: info
+            # Run id: the run's documents go to s3://<WAREHOUSE_BUCKET>/lab/runs/$(RUN_ID)/.
+            # scripts/run-distributed-stats.sh sets it; an empty value makes the CLI fail.
+            - name: RUN_ID
+              value: ""
+            # Number of shards (pods of the Indexed Job in step 2), 1 to 1000.
+            - name: SHARD_COUNT
+              value: ""
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: work
+              mountPath: /work
+              readOnly: true

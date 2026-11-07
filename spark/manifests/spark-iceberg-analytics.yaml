@@ -1,0 +1,110 @@
+# Iceberg features on the NYC Taxi tables: trip statistics (same definitions as the Rust CLI),
+# metadata tables, time travel and tags on the shared table; MERGE/UPDATE/DELETE, schema
+# evolution and maintenance procedures on the derived table nyc_taxi_trips_curated.
+#
+# Template: scripts/render-manifests.sh replaces the placeholders with Terraform outputs.
+# Run spark-iceberg-load first. The job is idempotent; to run it again:
+#   kubectl -n <SPARK_NAMESPACE> delete sparkapplication spark-iceberg-analytics
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: spark-iceberg-analytics
+  namespace: <SPARK_NAMESPACE>
+  labels:
+    app: spark-iceberg-analytics
+    app.kubernetes.io/part-of: spark-on-eks-iceberg
+spec:
+  type: Python
+  pythonVersion: "3"
+  mode: cluster
+  sparkVersion: "4.0.1"
+  image: "public.ecr.aws/data-on-eks/spark:4.0.1-scala2.13-java21-python3-r-ubuntu"
+  imagePullPolicy: IfNotPresent
+  mainApplicationFile: "s3a://<WAREHOUSE_BUCKET>/lab/scripts/spark/iceberg_nyc_taxi_analytics.py"
+  arguments:
+    - "--catalog"
+    - "glue"
+    - "--database"
+    - "<GLUE_DATABASE>"
+    - "--table"
+    - "<ICEBERG_TABLE>"
+    - "--warehouse"
+    - "<ICEBERG_WAREHOUSE>"
+    - "--curated-table"
+    - "nyc_taxi_trips_curated"
+    - "--retain-last"
+    - "5"
+  timeToLiveSeconds: 3600
+  sparkConf:
+    # Iceberg SQL extensions (MERGE, CALL, ALTER TABLE ... TAG) and the Glue catalog "glue".
+    "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+    "spark.sql.catalog.glue": "org.apache.iceberg.spark.SparkCatalog"
+    "spark.sql.catalog.glue.type": "glue"
+    "spark.sql.catalog.glue.warehouse": "<ICEBERG_WAREHOUSE>"
+    "spark.sql.catalog.glue.io-impl": "org.apache.iceberg.aws.s3.S3FileIO"
+    "spark.sql.catalog.glue.client.region": "<REGION>"
+    "spark.sql.catalog.glue.http-client.type": "apache"
+    # S3A with IRSA (job script, event logs, and the file listing of remove_orphan_files).
+    "spark.hadoop.fs.s3a.aws.credentials.provider": "software.amazon.awssdk.auth.credentials.WebIdentityTokenFileCredentialsProvider"
+    "spark.hadoop.fs.s3.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem"
+    "spark.hadoop.fs.s3a.endpoint.region": "<REGION>"
+    "spark.kubernetes.driverEnv.AWS_REGION": "<REGION>"
+    "spark.executorEnv.AWS_REGION": "<REGION>"
+    "spark.sql.shuffle.partitions": "8"
+    # Spark event logs (the directory must exist: at least one object under the S3 prefix).
+    "spark.eventLog.enabled": "true"
+    "spark.eventLog.dir": "<SPARK_EVENT_LOG_DIR>"
+    "spark.eventLog.rolling.enabled": "true"
+    "spark.eventLog.rolling.maxFileSize": "64m"
+    # Expose Spark metrics for Prometheus.
+    "spark.ui.prometheus.enabled": "true"
+    "spark.executor.processTreeMetrics.enabled": "true"
+    "spark.metrics.conf.*.sink.prometheusServlet.class": "org.apache.spark.metrics.sink.PrometheusServlet"
+    "spark.metrics.conf.driver.sink.prometheusServlet.path": "/metrics/driver/prometheus/"
+    "spark.metrics.conf.executor.sink.prometheusServlet.path": "/metrics/executors/prometheus/"
+  restartPolicy:
+    # Idempotent job: a retry converges to the same curated table.
+    type: OnFailure
+    onFailureRetries: 2
+    onFailureRetryInterval: 30
+    onSubmissionFailureRetries: 3
+    onSubmissionFailureRetryInterval: 20
+  driver:
+    cores: 1
+    coreLimit: "1200m"
+    memory: "2g"
+    memoryOverhead: "1g"
+    serviceAccount: <SPARK_SERVICE_ACCOUNT>
+    labels:
+      app: spark-iceberg-analytics
+      app.kubernetes.io/part-of: spark-on-eks-iceberg
+    annotations:
+      karpenter.sh/do-not-disrupt: "true"
+    nodeSelector:
+      NodeGroupType: "SparkComputeOptimized"
+      karpenter.sh/capacity-type: "on-demand"
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 185
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+  executor:
+    instances: 2
+    cores: 1
+    coreLimit: "1200m"
+    memory: "2g"
+    memoryOverhead: "1g"
+    serviceAccount: <SPARK_SERVICE_ACCOUNT>
+    labels:
+      app: spark-iceberg-analytics
+      app.kubernetes.io/part-of: spark-on-eks-iceberg
+    # Spot or on-demand (the NodePool allows both; Spark re-runs tasks of a lost executor).
+    nodeSelector:
+      NodeGroupType: "SparkComputeOptimized"
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 185
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]

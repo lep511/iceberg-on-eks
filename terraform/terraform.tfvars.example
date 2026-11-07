@@ -1,0 +1,22 @@
+# Copy to terraform.tfvars (git-ignored) and adjust. Every variable is optional; the values
+# shown in comments are the defaults.
+
+# region                = "us-west-2"
+# cluster_name          = "spark-on-eks"
+# name                  = "spark-on-eks-iceberg" # must start with spark-on-eks, max 36 characters
+# glue_database         = "nyc_taxi_database"
+# iceberg_table         = "nyc_taxi_table"
+# spark_namespace       = "spark-team-a" # existing namespace watched by the Spark Operator
+# spark_service_account = "spark-iceberg"
+# jobs_namespace        = "iceberg"
+# jobs_service_account  = "iceberg-jobs"
+
+# Write Spark event logs to the platform bucket (under spark-event-logs/) so the jobs show
+# up in the Spark History Server. Leave unset to use s3a://<warehouse_bucket>/lab/spark-event-logs.
+# Get the bucket name from the platform blueprint:
+#   terraform -chdir=<data-on-eks>/analytics/terraform/spark-k8s-operator output -raw s3_bucket_id_spark_history_server
+# spark_event_logs_bucket = "spark-on-eks-spark-logs-<suffix>"
+
+# tags = {
+#   Owner = "data-team"
+# }

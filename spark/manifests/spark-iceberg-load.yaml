@@ -1,0 +1,120 @@
+# Load the NYC Taxi sample payload into the shared Iceberg table (AWS Glue Data Catalog).
+#
+# Template: scripts/render-manifests.sh replaces the placeholders with Terraform outputs and
+# writes the result to build/manifests/spark/. scripts/upload-artifacts.sh must have uploaded
+# spark/iceberg_nyc_taxi_load.py and data/nyctaxi_payload.json to the lab/ prefix first.
+#
+# The first run creates the Glue database and the Iceberg table (through IRSA; the IDE role has
+# no Glue permissions). Every run APPENDS the 5,000 payload rows; change "--mode" to "overwrite"
+# to replace all rows instead. To run it again, delete the finished application first:
+#   kubectl -n <SPARK_NAMESPACE> delete sparkapplication spark-iceberg-load
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: spark-iceberg-load
+  namespace: <SPARK_NAMESPACE>
+  labels:
+    app: spark-iceberg-load
+    app.kubernetes.io/part-of: spark-on-eks-iceberg
+spec:
+  type: Python
+  pythonVersion: "3"
+  mode: cluster
+  sparkVersion: "4.0.1"
+  # Spark 4.0.1 / Scala 2.13 / Java 21 with Iceberg 1.10.0 (spark-runtime + extensions for
+  # Spark 4.0), AWS SDK v2 bundle 2.38.0 (Glue, S3, STS) and hadoop-aws 3.4.2.
+  image: "public.ecr.aws/data-on-eks/spark:4.0.1-scala2.13-java21-python3-r-ubuntu"
+  imagePullPolicy: IfNotPresent
+  mainApplicationFile: "s3a://<WAREHOUSE_BUCKET>/lab/scripts/spark/iceberg_nyc_taxi_load.py"
+  arguments:
+    - "--catalog"
+    - "glue"
+    - "--database"
+    - "<GLUE_DATABASE>"
+    - "--table"
+    - "<ICEBERG_TABLE>"
+    - "--warehouse"
+    - "<ICEBERG_WAREHOUSE>"
+    - "--input"
+    - "s3a://<WAREHOUSE_BUCKET>/lab/input/nyctaxi_payload.json"
+    - "--mode"
+    - "append"
+  # The operator deletes the application (and its pods) one hour after it finishes.
+  timeToLiveSeconds: 3600
+  sparkConf:
+    # Iceberg SQL extensions and the AWS Glue Data Catalog as the Spark catalog "glue".
+    "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+    "spark.sql.catalog.glue": "org.apache.iceberg.spark.SparkCatalog"
+    "spark.sql.catalog.glue.type": "glue"
+    "spark.sql.catalog.glue.warehouse": "<ICEBERG_WAREHOUSE>"
+    "spark.sql.catalog.glue.io-impl": "org.apache.iceberg.aws.s3.S3FileIO"
+    "spark.sql.catalog.glue.client.region": "<REGION>"
+    # The AWS SDK bundle in the image has the Apache HTTP client but no URLConnection client.
+    "spark.sql.catalog.glue.http-client.type": "apache"
+    # S3A (job script, payload, event logs) with IRSA credentials, AWS SDK v2.
+    "spark.hadoop.fs.s3a.aws.credentials.provider": "software.amazon.awssdk.auth.credentials.WebIdentityTokenFileCredentialsProvider"
+    "spark.hadoop.fs.s3.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem"
+    "spark.hadoop.fs.s3a.endpoint.region": "<REGION>"
+    "spark.kubernetes.driverEnv.AWS_REGION": "<REGION>"
+    "spark.executorEnv.AWS_REGION": "<REGION>"
+    # 5,000 rows: a few shuffle partitions are plenty.
+    "spark.sql.shuffle.partitions": "8"
+    # Spark event logs (Spark History Server when the platform logs bucket is used).
+    # The directory must exist: S3A needs at least one object under the prefix.
+    "spark.eventLog.enabled": "true"
+    "spark.eventLog.dir": "<SPARK_EVENT_LOG_DIR>"
+    "spark.eventLog.rolling.enabled": "true"
+    "spark.eventLog.rolling.maxFileSize": "64m"
+    # Expose Spark metrics for Prometheus.
+    "spark.ui.prometheus.enabled": "true"
+    "spark.executor.processTreeMetrics.enabled": "true"
+    "spark.metrics.conf.*.sink.prometheusServlet.class": "org.apache.spark.metrics.sink.PrometheusServlet"
+    "spark.metrics.conf.driver.sink.prometheusServlet.path": "/metrics/driver/prometheus/"
+    "spark.metrics.conf.executor.sink.prometheusServlet.path": "/metrics/executors/prometheus/"
+  restartPolicy:
+    # An append is not idempotent: a retry after the commit would load the rows twice, so the
+    # application is never re-run once it started. Submission failures are retried (nothing
+    # ran yet), and Spark itself retries failed tasks and lost executors.
+    type: OnFailure
+    onFailureRetries: 0
+    onSubmissionFailureRetries: 3
+    onSubmissionFailureRetryInterval: 20
+  driver:
+    cores: 1
+    coreLimit: "1200m"
+    memory: "2g"
+    memoryOverhead: "1g"
+    serviceAccount: <SPARK_SERVICE_ACCOUNT>
+    labels:
+      app: spark-iceberg-load
+      app.kubernetes.io/part-of: spark-on-eks-iceberg
+    annotations:
+      karpenter.sh/do-not-disrupt: "true"
+    nodeSelector:
+      NodeGroupType: "SparkComputeOptimized"
+      karpenter.sh/capacity-type: "on-demand"
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 185
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+  executor:
+    instances: 1
+    cores: 1
+    coreLimit: "1200m"
+    memory: "2g"
+    memoryOverhead: "1g"
+    serviceAccount: <SPARK_SERVICE_ACCOUNT>
+    labels:
+      app: spark-iceberg-load
+      app.kubernetes.io/part-of: spark-on-eks-iceberg
+    # Spot or on-demand (the NodePool allows both; Spark re-runs tasks of a lost executor).
+    nodeSelector:
+      NodeGroupType: "SparkComputeOptimized"
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 185
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]

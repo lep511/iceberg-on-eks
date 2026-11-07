@@ -1,0 +1,129 @@
+# Lists the S3 Object Annotations of one object (e.g. a data file annotated by
+# job-write-and-annotate.yaml). The object key comes from the DATA_FILE_KEY env var:
+#
+#   KEY=$(scripts/run-job.sh --raw build/manifests/rust/job-write-and-annotate.yaml | jq -r '.data.annotated_keys[0]')
+#   scripts/run-job.sh build/manifests/rust/job-list-annotations.yaml DATA_FILE_KEY="$KEY"
+# (run-job.sh sets DATA_FILE_KEY with `kubectl set env --local` before `kubectl create`)
+#
+# Without DATA_FILE_KEY the Job fails with "missing required field: key".
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # generateName gives every run a unique name: create it with `kubectl create -f`
+  # (`kubectl apply` does not support generateName).
+  generateName: iceberg-k8s-list-annotations-
+  namespace: <JOBS_NAMESPACE>
+  labels:
+    app.kubernetes.io/name: iceberg-k8s
+    app.kubernetes.io/component: list-annotations
+    app.kubernetes.io/part-of: spark-on-eks-iceberg
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      annotations:
+        # Keep Auto Mode consolidation from evicting the pod mid-run.
+        karpenter.sh/do-not-disrupt: "true"
+      labels:
+        app.kubernetes.io/name: iceberg-k8s
+        app.kubernetes.io/component: list-annotations
+        app.kubernetes.io/part-of: spark-on-eks-iceberg
+    spec:
+      # IRSA: the service account is annotated with the project's IRSA role.
+      serviceAccountName: <JOBS_SERVICE_ACCOUNT>
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/arch: amd64
+        karpenter.sh/capacity-type: on-demand
+        NodeGroupType: general-purpose
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        # Makes the projected IRSA token readable by the non-root user.
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: work
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+      initContainers:
+        # Downloads the CLI (built by rust/build.sh, uploaded by scripts/upload-artifacts.sh).
+        - name: fetch
+          image: public.ecr.aws/aws-cli/aws-cli:2.39.5
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              aws s3 cp --only-show-errors "s3://<WAREHOUSE_BUCKET>/lab/bin/iceberg-k8s" /work/iceberg-k8s
+              chmod 0755 /work/iceberg-k8s
+              ls -l /work
+          env:
+            - name: AWS_REGION
+              value: <REGION>
+            # The AWS CLI keeps its cache under $HOME; the root filesystem is read-only.
+            - name: HOME
+              value: /tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: work
+              mountPath: /work
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: iceberg-k8s
+          # glibc 2.34 (same as the AL2023 build host), CA bundle in /etc/pki/tls/certs.
+          image: public.ecr.aws/amazonlinux/amazonlinux:2023.12.20261102.0-minimal
+          command: ["/work/iceberg-k8s"]
+          args:
+            - "--action"
+            - "list_annotations"
+            - "--bucket"
+            - "<WAREHOUSE_BUCKET>"
+            - "--key"
+            - "$(DATA_FILE_KEY)"
+          env:
+            - name: ICEBERG_WAREHOUSE
+              value: <ICEBERG_WAREHOUSE>
+            - name: AWS_REGION
+              value: <REGION>
+            - name: RUST_LOG
+              value: info
+            # S3 key of the object to inspect, e.g. one of `data.annotated_keys` printed by
+            # job-write-and-annotate.yaml. Set it with `kubectl set env --local` when creating the
+            # Job (see the comment at the top of this file).
+            - name: DATA_FILE_KEY
+              value: ""
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: work
+              mountPath: /work
+              readOnly: true

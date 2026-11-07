@@ -1,0 +1,53 @@
+[package]
+name = "iceberg-k8s"
+version = "0.1.0"
+edition = "2024"
+# iceberg 0.11 needs Rust 1.95 or later
+rust-version = "1.95"
+description = "CLI that reads/writes Apache Iceberg tables (Glue catalog), S3 Metadata configurations and S3 Object Annotations; runs as a Kubernetes Job on EKS with IRSA"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "iceberg-k8s"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+
+# Command-line parsing
+clap = { version = "4", features = ["derive"] }
+
+# Request/response (de)serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Apache Iceberg (official apache/iceberg-rust crates)
+iceberg = "0.11.0"
+iceberg-catalog-glue = "0.11.0"
+iceberg-storage-opendal = "0.11.0"
+
+# Arrow/Parquet: must match iceberg 0.11.0's internal version (58.4)
+arrow-array = "58.4"
+arrow-schema = "58.4"
+parquet = "58.4"
+
+uuid = { version = "1", features = ["v4"] }
+aws-config = "1"
+# Bridges aws-config credentials (IRSA web identity) into the opendal/reqsign FileIO signer
+aws-credential-types = "1"
+reqsign-core = "3.3"
+aws-sdk-s3 = "1"
+aws-sdk-s3tables = "1"
+futures = "0.3"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

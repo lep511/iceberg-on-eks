@@ -1,0 +1,26 @@
+# Build outputs: compiled binaries and rendered Kubernetes manifests
+build/
+
+# Rust
+**/target/
+**/*.rs.bk
+
+# Python
+**/.venv/
+**/__pycache__/
+**/.pytest_cache/
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+crash.log
+override.tf
+*_override.tf
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/

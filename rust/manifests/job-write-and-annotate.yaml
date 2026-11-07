@@ -1,0 +1,131 @@
+# Appends the 5,000-row sample (s3://<WAREHOUSE_BUCKET>/lab/input/nyctaxi_payload.json) to the
+# shared table (one fast-append snapshot) and annotates each new Parquet data file with a
+# "trip_stats" S3 Object Annotation. The payload's action is "write"; the flags turn it into
+# "write_and_annotate" and point it at the Terraform-managed bucket, database and table.
+# Each run appends the rows again. "data.annotated_keys" lists the annotated S3 keys.
+#
+# Render with scripts/render-manifests.sh, then run it and print the response (waits until
+# the Job completes or fails):
+#   scripts/run-job.sh build/manifests/rust/job-write-and-annotate.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # generateName gives every run a unique name: create it with `kubectl create -f`
+  # (`kubectl apply` does not support generateName).
+  generateName: iceberg-k8s-write-and-annotate-
+  namespace: <JOBS_NAMESPACE>
+  labels:
+    app.kubernetes.io/name: iceberg-k8s
+    app.kubernetes.io/component: write-and-annotate
+    app.kubernetes.io/part-of: spark-on-eks-iceberg
+spec:
+  # No retries: a retry would append the 5,000 rows a second time.
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      annotations:
+        # Keep Auto Mode consolidation from evicting the pod mid-run.
+        karpenter.sh/do-not-disrupt: "true"
+      labels:
+        app.kubernetes.io/name: iceberg-k8s
+        app.kubernetes.io/component: write-and-annotate
+        app.kubernetes.io/part-of: spark-on-eks-iceberg
+    spec:
+      # IRSA: the service account is annotated with the project's IRSA role.
+      serviceAccountName: <JOBS_SERVICE_ACCOUNT>
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/arch: amd64
+        karpenter.sh/capacity-type: on-demand
+        NodeGroupType: general-purpose
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        # Makes the projected IRSA token readable by the non-root user.
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: work
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+      initContainers:
+        # Downloads the CLI (built by rust/build.sh, uploaded by scripts/upload-artifacts.sh).
+        - name: fetch
+          image: public.ecr.aws/aws-cli/aws-cli:2.39.5
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              aws s3 cp --only-show-errors "s3://<WAREHOUSE_BUCKET>/lab/bin/iceberg-k8s" /work/iceberg-k8s
+              aws s3 cp --only-show-errors "s3://<WAREHOUSE_BUCKET>/lab/input/nyctaxi_payload.json" /work/nyctaxi_payload.json
+              chmod 0755 /work/iceberg-k8s
+              ls -l /work
+          env:
+            - name: AWS_REGION
+              value: <REGION>
+            # The AWS CLI keeps its cache under $HOME; the root filesystem is read-only.
+            - name: HOME
+              value: /tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: work
+              mountPath: /work
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: iceberg-k8s
+          # glibc 2.34 (same as the AL2023 build host), CA bundle in /etc/pki/tls/certs.
+          image: public.ecr.aws/amazonlinux/amazonlinux:2023.12.20261102.0-minimal
+          command: ["/work/iceberg-k8s"]
+          args:
+            - "--request"
+            - "/work/nyctaxi_payload.json"
+            - "--action"
+            - "write_and_annotate"
+            - "--bucket"
+            - "<WAREHOUSE_BUCKET>"
+            - "--namespace"
+            - "<GLUE_DATABASE>"
+            - "--table"
+            - "<ICEBERG_TABLE>"
+          env:
+            - name: ICEBERG_WAREHOUSE
+              value: <ICEBERG_WAREHOUSE>
+            - name: AWS_REGION
+              value: <REGION>
+            - name: RUST_LOG
+              value: info
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: work
+              mountPath: /work
+              readOnly: true

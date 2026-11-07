@@ -1,0 +1,110 @@
+# DESTRUCTIVE: drops nyc_taxi_trips_curated and the shared table with PURGE (all their data and
+# metadata files are deleted), then drops the Glue database (never CASCADE: it fails and lists
+# any other table left in it).
+#
+# Run it BEFORE `terraform destroy`: the IDE role has no Glue permissions, so the Glue objects
+# can only be removed from inside the cluster with this job's IRSA role, which Terraform deletes.
+# Applying this manifest is the confirmation (it passes --confirm). Safe to run again when the
+# objects are already gone. Afterwards:
+#   kubectl -n <SPARK_NAMESPACE> delete sparkapplication spark-iceberg-cleanup
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: spark-iceberg-cleanup
+  namespace: <SPARK_NAMESPACE>
+  labels:
+    app: spark-iceberg-cleanup
+    app.kubernetes.io/part-of: spark-on-eks-iceberg
+spec:
+  type: Python
+  pythonVersion: "3"
+  mode: cluster
+  sparkVersion: "4.0.1"
+  image: "public.ecr.aws/data-on-eks/spark:4.0.1-scala2.13-java21-python3-r-ubuntu"
+  imagePullPolicy: IfNotPresent
+  mainApplicationFile: "s3a://<WAREHOUSE_BUCKET>/lab/scripts/spark/iceberg_cleanup.py"
+  arguments:
+    - "--catalog"
+    - "glue"
+    - "--database"
+    - "<GLUE_DATABASE>"
+    - "--table"
+    - "<ICEBERG_TABLE>"
+    - "--curated-table"
+    - "nyc_taxi_trips_curated"
+    - "--warehouse"
+    - "<ICEBERG_WAREHOUSE>"
+    - "--confirm"
+  timeToLiveSeconds: 3600
+  sparkConf:
+    "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+    "spark.sql.catalog.glue": "org.apache.iceberg.spark.SparkCatalog"
+    "spark.sql.catalog.glue.type": "glue"
+    "spark.sql.catalog.glue.warehouse": "<ICEBERG_WAREHOUSE>"
+    "spark.sql.catalog.glue.io-impl": "org.apache.iceberg.aws.s3.S3FileIO"
+    "spark.sql.catalog.glue.client.region": "<REGION>"
+    "spark.sql.catalog.glue.http-client.type": "apache"
+    # S3A with IRSA (job script, event logs, and the listing of files left after PURGE).
+    "spark.hadoop.fs.s3a.aws.credentials.provider": "software.amazon.awssdk.auth.credentials.WebIdentityTokenFileCredentialsProvider"
+    "spark.hadoop.fs.s3.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem"
+    "spark.hadoop.fs.s3a.endpoint.region": "<REGION>"
+    "spark.kubernetes.driverEnv.AWS_REGION": "<REGION>"
+    "spark.executorEnv.AWS_REGION": "<REGION>"
+    "spark.sql.shuffle.partitions": "8"
+    # Spark event logs (the directory must exist: at least one object under the S3 prefix).
+    "spark.eventLog.enabled": "true"
+    "spark.eventLog.dir": "<SPARK_EVENT_LOG_DIR>"
+    "spark.eventLog.rolling.enabled": "true"
+    "spark.eventLog.rolling.maxFileSize": "64m"
+    # Expose Spark metrics for Prometheus.
+    "spark.ui.prometheus.enabled": "true"
+    "spark.executor.processTreeMetrics.enabled": "true"
+    "spark.metrics.conf.*.sink.prometheusServlet.class": "org.apache.spark.metrics.sink.PrometheusServlet"
+    "spark.metrics.conf.driver.sink.prometheusServlet.path": "/metrics/driver/prometheus/"
+    "spark.metrics.conf.executor.sink.prometheusServlet.path": "/metrics/executors/prometheus/"
+  restartPolicy:
+    # Every step uses IF EXISTS, so a retry only finishes what is left.
+    type: OnFailure
+    onFailureRetries: 2
+    onFailureRetryInterval: 30
+    onSubmissionFailureRetries: 3
+    onSubmissionFailureRetryInterval: 20
+  driver:
+    cores: 1
+    coreLimit: "1200m"
+    memory: "2g"
+    memoryOverhead: "1g"
+    serviceAccount: <SPARK_SERVICE_ACCOUNT>
+    labels:
+      app: spark-iceberg-cleanup
+      app.kubernetes.io/part-of: spark-on-eks-iceberg
+    annotations:
+      karpenter.sh/do-not-disrupt: "true"
+    nodeSelector:
+      NodeGroupType: "SparkComputeOptimized"
+      karpenter.sh/capacity-type: "on-demand"
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 185
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+  executor:
+    # PURGE deletes the files of every snapshot with a distributed Spark action.
+    instances: 1
+    cores: 1
+    coreLimit: "1200m"
+    memory: "2g"
+    memoryOverhead: "1g"
+    serviceAccount: <SPARK_SERVICE_ACCOUNT>
+    labels:
+      app: spark-iceberg-cleanup
+      app.kubernetes.io/part-of: spark-on-eks-iceberg
+    nodeSelector:
+      NodeGroupType: "SparkComputeOptimized"
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 185
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
